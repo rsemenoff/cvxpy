@@ -208,7 +208,6 @@ class CPLEX(ConicSolver):
     # Solver capabilities.
     MIP_CAPABLE = True
     SUPPORTED_CONSTRAINTS = ConicSolver.SUPPORTED_CONSTRAINTS + [SOC]
-    MI_SUPPORTED_CONSTRAINTS = SUPPORTED_CONSTRAINTS
 
     def name(self):
         """The name of the solver. """
@@ -265,7 +264,15 @@ class CPLEX(ConicSolver):
             opt_val = (model.solution.get_objective_value() +
                        inverse_data[s.OFFSET])
 
-            x = np.array(model.solution.get_values())
+            #x = np.array(model.solution.get_values())#2022-10-20 RWS read .sol file here.XML.
+            print("reading soln.sol;")
+            import xml.etree.ElementTree as ET
+            vd="c:/Users/Rwsin/myproject/"
+            tree = ET.parse(vd+"soln.sol")#"/mnt/c/Users/Rwsin/myproject/soln.sol")
+            root = tree.getroot()
+            x=np.array([child.attrib['value'] for child in root[3]])
+
+
             primal_vars = {inverse_data[CPLEX.VAR_ID]: x}
 
             if not inverse_data['is_mip']:
@@ -283,9 +290,119 @@ class CPLEX(ConicSolver):
         else:
             return failure_solution(status)
 
+    def solve_via_data_1(self, data, warm_start: bool, verbose: bool, solver_opts, solver_cache=None):#2022-09-30
+        print("We are here!")
+        import cplex
+        print("i can write code")
+        c = data[s.C]
+        b = data[s.B]
+        A = dok_matrix(data[s.A])
+        # Save the dok_matrix.
+        data[s.A] = A
+        dims = dims_to_solver_dict(data[s.DIMS])
+
+        n = c.shape[0]
+
+        model = cplex.Cplex()
+        variables = []
+        # cpx_constrs will contain CpxConstr namedtuples (see above).
+        cpx_constrs = []
+        vtype = []
+        if data[s.BOOL_IDX] or data[s.INT_IDX]:
+            for i in range(n):
+                # Set variable type.
+                if i in data[s.BOOL_IDX]:
+                    vtype.append('B')
+                elif i in data[s.INT_IDX]:
+                    vtype.append('I')
+                else:
+                    vtype.append('C')
+        else:
+            # If we specify types (even with 'C'), then the problem will
+            # be interpreted as a MIP. Leaving vtype as an empty list
+            # here, will ensure that the problem type remains an LP.
+            pass
+        # Add the variables in a batch
+        variables = list(model.variables.add(
+            obj=[c[i] for i in range(n)],
+            lb=[-cplex.infinity]*n,  # default LB is 0
+            ub=[cplex.infinity]*n,
+            types="".join(vtype),
+            names=["x_%d" % i for i in range(n)]))
+
+        # Add equality constraints
+        cpx_constrs += [_CpxConstr(_LIN, x)
+                        for x in self.add_model_lin_constr(
+                                model, variables,
+                                range(dims[s.EQ_DIM]),
+                                'E', A, b)]
+
+        # Add inequality (<=) constraints
+        leq_start = dims[s.EQ_DIM]
+        leq_end = dims[s.EQ_DIM] + dims[s.LEQ_DIM]
+        cpx_constrs += [_CpxConstr(_LIN, x)
+                        for x in self.add_model_lin_constr(
+                                model, variables,
+                                range(leq_start, leq_end),
+                                'L', A, b)]
+
+        # Add SOC constraints
+        soc_start = leq_end
+        for constr_len in dims[s.SOC_DIM]:
+            soc_end = soc_start + constr_len
+            soc_constr, new_leq, new_vars = self.add_model_soc_constr(
+                model, variables, range(soc_start, soc_end), A, b)
+            cpx_constrs.append(_CpxConstr(_QUAD, soc_constr))
+            cpx_constrs += [_CpxConstr(_LIN, x) for x in new_leq]
+            variables += new_vars
+            soc_start += constr_len
+
+        # Set verbosity
+        if not verbose:
+            hide_solver_output(model)
+
+        # For CVXPY, we set the qcpduals parameter here, but the user can
+        # easily override it via the "cplex_params" solver option (see
+        # set_parameters function).
+        model.parameters.preprocessing.qcpduals.set(
+            model.parameters.preprocessing.qcpduals.values.force)
+
+        # Set parameters
+        reoptimize = solver_opts.pop('reoptimize', False)
+        set_parameters(model, solver_opts)
+
+        # Solve problem
+        solution = {"model": model}
+        #RWS now write_lp()
+        model.write("svd.mps")
+
+    def solve_via_data_2(self, data, warm_start: bool, verbose: bool, solver_opts, solver_cache=None):
+
+            #model.solve()
+            #create an empty model
+            # load solution file
+            #solution[s.SOLVE_TIME] = model.get_time() - start_time
+
+        #     ambiguous_status = get_status(model) == s.INFEASIBLE_OR_UNBOUNDED
+        #     if ambiguous_status and reoptimize:
+        #         model.parameters.preprocessing.presolve.set(0)
+        #         start_time = model.get_time()
+        #         model.solve()
+        #         solution[s.SOLVE_TIME] += model.get_time() - start_time
+
+        # except Exception:
+        #     pass
+
+        # return solution
+        return
+
+
+
+
+
     def solve_via_data(self, data, warm_start: bool, verbose: bool, solver_opts, solver_cache=None):
         import cplex
-
+        print("i can write code")
         c = data[s.C]
         b = data[s.B]
         A = dok_matrix(data[s.A])
