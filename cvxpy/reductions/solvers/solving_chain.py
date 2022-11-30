@@ -1,27 +1,21 @@
-from __future__ import annotations
-
 import warnings
-from typing import Any, List, Optional
+from typing import Any, List
 
 import numpy as np
 
 from cvxpy.atoms import EXP_ATOMS, NONPOS_ATOMS, PSD_ATOMS, SOC_ATOMS
-from cvxpy.constraints import (PSD, SOC, Equality, ExpCone, FiniteSet,
-                               Inequality, NonNeg, NonPos, PowCone3D, Zero,)
-from cvxpy.constraints.exponential import OpRelConeQuad, RelEntrQuad
+from cvxpy.constraints import (PSD, SOC, Equality, ExpCone, Inequality, NonNeg,
+                               NonPos, PowCone3D, Zero,)
 from cvxpy.error import DCPError, DGPError, DPPError, SolverError
 from cvxpy.problems.objective import Maximize
 from cvxpy.reductions.chain import Chain
 from cvxpy.reductions.complex2real import complex2real
-from cvxpy.reductions.cone2cone.approximations import APPROX_CONES, QuadApprox
 from cvxpy.reductions.cone2cone.exotic2common import (EXOTIC_CONES,
                                                       Exotic2Common,)
 from cvxpy.reductions.cvx_attr2constr import CvxAttr2Constr
 from cvxpy.reductions.dcp2cone.cone_matrix_stuffing import ConeMatrixStuffing
 from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
 from cvxpy.reductions.dgp2dcp.dgp2dcp import Dgp2Dcp
-from cvxpy.reductions.discrete2mixedint.valinvec2mixedint import (
-    Valinvec2mixedint,)
 from cvxpy.reductions.eval_params import EvalParams
 from cvxpy.reductions.flip_objective import FlipObjective
 from cvxpy.reductions.qp2quad_form import qp2symbolic_qp
@@ -121,21 +115,15 @@ def _reductions_for_problem_class(problem, candidates, gp: bool = False) -> List
             raise SolverError("Problem could not be reduced to a QP, and no "
                               "conic solvers exist among candidate solvers "
                               "(%s)." % candidates)
-
-    constr_types = {type(c) for c in problem.constraints}
-    if FiniteSet in constr_types:
-        reductions += [Valinvec2mixedint()]
-
+        else:
+            reductions += [Dcp2Cone(), CvxAttr2Constr()]
     return reductions
 
 
 def construct_solving_chain(problem, candidates,
                             gp: bool = False,
                             enforce_dpp: bool = False,
-                            ignore_dpp: bool = False,
-                            canon_backend: str | None = None,
-                            solver_opts: Optional[dict] = None
-                            ) -> "SolvingChain":
+                            ignore_dpp: bool = False) -> "SolvingChain":
     """Build a reduction chain from a problem to an installed solver.
 
     Note that if the supplied problem has 0 variables, then the solver
@@ -157,13 +145,6 @@ def construct_solving_chain(problem, candidates,
     ignore_dpp : bool, optional
         When True, DPP problems will be treated as non-DPP,
         which may speed up compilation. Defaults to False.
-    canon_backend : str, optional
-        'CPP' (default) | 'SCIPY'
-        Specifies which backend to use for canonicalization, which can affect
-        compilation time. Defaults to None, i.e., selecting the default
-        backend.
-    solver_opts : dict, optional
-        Additional arguments to pass to the solver.
 
     Returns
     -------
@@ -215,7 +196,7 @@ def construct_solving_chain(problem, candidates,
         # Canonicalize as a QP
         solver = candidates['qp_solvers'][0]
         solver_instance = slv_def.SOLVER_MAP_QP[solver]
-        reductions += [QpMatrixStuffing(canon_backend=canon_backend),
+        reductions += [QpMatrixStuffing(),
                        solver_instance]
         return SolvingChain(reductions=reductions)
 
@@ -231,17 +212,11 @@ def construct_solving_chain(problem, candidates,
     for c in problem.constraints:
         constr_types.add(type(c))
     ex_cos = [ct for ct in constr_types if ct in EXOTIC_CONES]
-    approx_cos = [ct for ct in constr_types if ct in APPROX_CONES]
     # ^ The way we populate "ex_cos" will need to change if and when
     # we have atoms that require exotic cones.
     for co in ex_cos:
         sim_cos = EXOTIC_CONES[co]  # get the set of required simple cones
         constr_types.update(sim_cos)
-        constr_types.remove(co)
-
-    for co in approx_cos:
-        app_cos = APPROX_CONES[co]
-        constr_types.update(app_cos)
         constr_types.remove(co)
     # We now go over individual elementary cones support by CVXPY (
     # SOC, ExpCone, NonNeg, Zero, PSD, PowCone3D) and check if
@@ -274,31 +249,11 @@ def construct_solving_chain(problem, candidates,
 
     for solver in candidates['conic_solvers']:
         solver_instance = slv_def.SOLVER_MAP_CONIC[solver]
-        # Cones supported for MI problems may differ from non MI.
-        if problem.is_mixed_integer():
-            supported_constraints = solver_instance.MI_SUPPORTED_CONSTRAINTS
-        else:
-            supported_constraints = solver_instance.SUPPORTED_CONSTRAINTS
-        if (all(c in supported_constraints for c in cones)
+        if (all(c in solver_instance.SUPPORTED_CONSTRAINTS for c in cones)
                 and (has_constr or not solver_instance.REQUIRES_CONSTR)):
             if ex_cos:
                 reductions.append(Exotic2Common())
-            if RelEntrQuad in approx_cos or OpRelConeQuad in approx_cos:
-                reductions.append(QuadApprox())
-
-            # Should the objective be canonicalized to a quadratic?
-            if solver_opts is None:
-                use_quad_obj = True
-            else:
-                use_quad_obj = solver_opts.get("use_quad_obj", True)
-            quad_obj = use_quad_obj and solver_instance.supports_quad_obj() and \
-                problem.objective.expr.has_quadratic_term()
-            reductions += [
-                Dcp2Cone(quad_obj=quad_obj),
-                CvxAttr2Constr(),
-                ConeMatrixStuffing(quad_obj=quad_obj, canon_backend=canon_backend),
-                solver_instance
-            ]
+            reductions += [ConeMatrixStuffing(), solver_instance]
             return SolvingChain(reductions=reductions)
 
     raise SolverError("Either candidate conic solvers (%s) do not support the "
@@ -405,3 +360,84 @@ class SolvingChain(Chain):
         """
         return self.solver.solve_via_data(data, warm_start, verbose,
                                           solver_opts, problem._solver_cache)
+    def solve_via_data_1(self, problem, data, warm_start: bool = False, verbose: bool = False,
+                       solver_opts={}):
+        """Solves the problem using the data output by the an apply invocation.
+
+        The semantics are:
+
+        .. code :: python
+
+            data, inverse_data = solving_chain.apply(problem)
+            solution = solving_chain.invert(solver_chain.solve_via_data(data, ...))
+
+        which is equivalent to writing
+
+        .. code :: python
+
+            solution = solving_chain.solve(problem, ...)
+
+        Parameters
+        ----------
+        problem : Problem
+            The problem to solve.
+        data : map
+            Data for the solver.
+        warm_start : bool
+            Whether to warm start the solver.
+        verbose : bool
+            Whether to enable solver verbosity.
+        solver_opts : dict
+            Solver specific options.
+
+        Returns
+        -------
+        raw solver solution
+            The information returned by the solver; this is not necessarily
+            a Solution object.
+        """
+        print("here i am.")#2022-10-10 next line to call via_data_1
+        r=self.solver.solve_via_data_1(data, warm_start, verbose,
+                                          solver_opts, problem._solver_cache)
+        return r
+                                          
+    def solve_via_data_2(self, problem, data, warm_start: bool = False, verbose: bool = False,
+                       solver_opts={}):
+        """Solves the problem using the data output by the an apply invocation.
+
+        The semantics are:
+
+        .. code :: python
+
+            data, inverse_data = solving_chain.apply(problem)
+            solution = solving_chain.invert(solver_chain.solve_via_data(data, ...))
+
+        which is equivalent to writing
+
+        .. code :: python
+
+            solution = solving_chain.solve(problem, ...)
+
+        Parameters
+        ----------
+        problem : Problem
+            The problem to solve.
+        data : map
+            Data for the solver.
+        warm_start : bool
+            Whether to warm start the solver.
+        verbose : bool
+            Whether to enable solver verbosity.
+        solver_opts : dict
+            Solver specific options.
+
+        Returns
+        -------
+        raw solver solution
+            The information returned by the solver; this is not necessarily
+            a Solution object.
+        """
+        print("here i am.")
+        return self.solver.solve_via_data_2(data, warm_start, verbose,
+                                          solver_opts, problem._solver_cache)
+
