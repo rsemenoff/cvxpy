@@ -53,7 +53,7 @@ class CPLEX(QpSolver):
         status=s.OPTIMAL#SOLUTION_PRESENT#2022-10-26
         
         if status in s.SOLUTION_PRESENT:
-            print("status ok.")
+            print("cplex_qpif.invert status ok.")
         if True:
             # Get objective value
             # opt_val = model.solution.get_objective_value() + \
